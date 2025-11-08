@@ -1,0 +1,108 @@
+#cloud-config
+# vim: syntax=yaml
+#
+# ***********************
+# 	---- for more examples look at: ------
+# ---> https://cloudinit.readthedocs.io/en/latest/topics/examples.html
+# ******************************
+#
+# This is the configuration syntax that the write_files module
+# will know how to understand. encoding can be given b64 or gzip or (gz+b64).
+# The content will be decoded accordingly and then written to the path that is
+# provided.
+#
+# Note: Content strings here are truncated for example purposes.
+
+package_update: true
+package_upgrade: true
+package_reboot_if_required: true
+
+ssh_pwauth: True
+disable_root: False
+hostname: ${VM_NAME}
+chpasswd:
+    expire: False
+    list: |
+        root:${ROOT_PSW}
+
+packages:
+  - curl
+  - openssl
+  - jq
+  - tpm2-tools
+  - tpm2-openssl
+  - ca-certificates
+
+users:
+  - name: service-technician
+    lock_passwd: "true"
+    homedir: /home/service-technician
+    shell: /bin/bash
+
+runcmd:
+  - echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+  - systemctl restart ssh
+  - update-ca-certificates
+  - /root/gen_device_cert.sh
+
+write_files:
+  - content: |
+      #!/bin/bash
+     
+      if [ ! -f /etc/ssl/certs/device.crt ]; then
+        TOKEN=$(curl \
+          --request POST \
+          --cert /etc/ssl/certs/bootstrap.crt \
+          --key /etc/ssl/private/bootstrap.key \
+          --data '{"name":"clients"}' \
+          https://${VM_GATEWAY_IP}:8443/v1/auth/cert/login | jq -r '.auth.client_token' )
+
+        # genereate device key using TPM2        
+        openssl genpkey -provider tpm2 -algorithm RSA -out /etc/ssl/private/device.key
+        OPENSSL_MODULES=/usr/lib/ssl/modules sudo openssl req -provider default -provider tpm2 -key /etc/ssl/private/device.key -new -subj "/CN=${VM_NAME}" -out device.csr
+  
+        export CSR=$(cat device.csr)
+        export payload=$(jq -n --arg csr "$CSR" '{"csr":$csr}')
+  
+        CERTIFICATE=$(curl \
+          --header "X-Vault-Token: $TOKEN" \
+          --request POST \
+          --data "$payload" \
+          https://${VM_GATEWAY_IP}:8443/v1/devices/sign/device | jq -r '.data.certificate')
+        
+        echo "$CERTIFICATE" > /etc/ssl/certs/device.crt
+        chmod 600 /etc/ssl/certs/device.crt
+      fi
+
+    path: /root/gen_device_cert.sh
+    permissions: '0500'
+  - content: |
+      #!/bin/bash
+
+      export OPENSSL_MODULES=/usr/lib/ssl/modules
+
+      TOKEN=$(curl \
+        --request POST \
+        --cert /etc/ssl/certs/device.crt \
+        --key /etc/ssl/private/device.key \
+        --data '{"name":"clients"}' \
+        https://${VM_GATEWAY_IP}:8443/v1/auth/cert/login | jq -r '.auth.client_token' )
+
+    path: /root/gen_client_cert.sh
+    permissions: '0500'
+  - content: |
+      ${PKI_SERVER_CERT}
+    path: /usr/local/share/ca-certificates/pki.crt
+    permissions: '0500'
+    encoding: b64
+  - content: |
+      ${BOOTSTRAP_CERT}
+    path: /etc/ssl/certs/bootstrap.crt
+    permissions: '0500'
+    encoding: b64
+  - content: |
+     ${BOOTSTRAP_KEY}
+    path: /etc/ssl/private/bootstrap.key
+    permissions: '0500'
+    encoding: b64
+
