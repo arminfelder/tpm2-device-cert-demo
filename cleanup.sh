@@ -66,7 +66,8 @@ function remove_configs() {
 }
 
 function remove_certs() {
-    rm -rf ./pki
+    sudo rm -rf ./pki
+    sudo rm -rf ./mqtt-certs
 }
 
 function main() {

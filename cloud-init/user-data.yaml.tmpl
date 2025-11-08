@@ -31,6 +31,11 @@ packages:
   - jq
   - tpm2-tools
   - tpm2-openssl
+  - tpm2-tools
+  - tpm2-abrmd
+  - libtss2-tcti-tabrmd0
+  - libtpm2-pkcs11-tools
+  - libtpm2-pkcs11-1
   - ca-certificates
 
 users:
@@ -85,10 +90,21 @@ write_files:
         --request POST \
         --cert /etc/ssl/certs/device.crt \
         --key /etc/ssl/private/device.key \
-        --data '{"name":"clients"}' \
+        --data '{"name":"device-auth"}' \
         https://${VM_GATEWAY_IP}:8443/v1/auth/cert/login | jq -r '.auth.client_token' )
 
-    path: /root/gen_client_cert.sh
+      OPENSSL_MODULES=/usr/lib/ssl/modules sudo openssl req -provider default -provider tpm2 -key /etc/ssl/private/device.key -new -subj "/CN=${VM_NAME}" -out mqtt.csr
+
+      export CSR=$(cat mqtt.csr)
+      export payload=$(jq -n --arg csr "$CSR" '{"csr":$csr}')
+    
+      CERTIFICATE=$(curl \
+        --header "X-Vault-Token: $TOKEN" \
+        --request POST \
+        --data "$payload" \
+        https://${VM_GATEWAY_IP}:8443/v1/mqtt-broker/sign/device | jq -r '.data.certificate')
+
+    path: /root/gen_mqtt_cert.sh
     permissions: '0500'
   - content: |
       ${PKI_SERVER_CERT}
@@ -103,6 +119,11 @@ write_files:
   - content: |
      ${BOOTSTRAP_KEY}
     path: /etc/ssl/private/bootstrap.key
+    permissions: '0500'
+    encoding: b64
+  - content: |
+      ${BROKER_CA_CERT}
+    path: /usr/local/share/ca-certificates/broker.crt
     permissions: '0500'
     encoding: b64
 

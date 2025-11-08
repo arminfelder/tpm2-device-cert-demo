@@ -1,0 +1,123 @@
+services:
+  pki:
+    image: &baoimage openbao/openbao:2.4.3-amd64
+    environment:
+      BAO_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      BAO_DEV_ROOT_TOKEN_ID: &token "insecure_changeme!"
+    command:
+      - server
+      - -dev
+      - -dev-no-store-token
+      - -config=/tmp/storageconfig.hcl
+
+    ports:
+      - "8200:8200"
+      - "8443:8443"
+    volumes:
+      - ./pki:/mnt/pki
+      - ./bao_config.hcl:/tmp/storageconfig.hcl
+  pki-init:
+    image: *baoimage
+    environment:
+      BAO_TOKEN: *token
+      BAO_ADDR: "http://pki:8200"
+    depends_on:
+      - pki
+    command:
+      - /bin/sh
+      - -c
+      - |
+          sleep 5
+  
+          # create device cert
+          bao secrets enable -path=devices pki
+          bao secrets tune -max-lease-ttl=87600h devices
+          bao write devices/root/generate/internal common_name="example.tld" ttl=87600h
+          bao write devices/config/urls issuing_certificates="http://pki:8200/v1/devices/ca" crl_distribution_points="http://pki:8200/v1/devices/crl"
+          bao secrets enable -path=devices/issue pki
+          bao write devices/roles/device allow_any_name=true client_flag=false server_flag=false key_usage="DigitalSignature,KeyEncipherment" ext_key_usage="ClientAuth" enforce_hostnames="false" max_ttl=10950d
+        
+          # mqtt-broker
+          bao secrets enable -path=mqtt-broker pki
+          bao secrets tune -max-lease-ttl=87600h mqtt-broker
+          bao write mqtt-broker/root/generate/internal common_name="example.tld" ttl=87600h
+          bao write mqtt-broker/config/urls issuing_certificates="http://pki:8200/v1/mqtt-broker/ca" crl_distribution_points="http://pki:8200/v1/mqtt-broker/crl"
+          bao secrets enable -path=mqtt-broker/issue pki
+          bao write mqtt-broker/roles/device allow_any_name=true client_flag=false server_flag=false key_usage="DigitalSignature,KeyEncipherment" ext_key_usage="ClientAuth" enforce_hostnames="false" max_ttl=10950d
+               
+        
+          # Policy allowing CSR signing on devices/roles/device
+          cat >/tmp/policy-devices-sign.hcl <<'EOF'
+          path "devices/issue/device" {
+            capabilities = ["create", "update"]
+          }
+          path "devices/sign/device" {
+            capabilities = ["create", "update"]
+          }
+          EOF
+          bao policy write devices-sign /tmp/policy-devices-sign.hcl
+          
+          cat >/tmp/policy-devices.hcl <<'EOF'
+          path "devices/issue/device" {
+            capabilities = ["create", "update"]
+          }
+          path "devices/sign/device" {
+            capabilities = ["create", "update"]
+          }
+          EOF
+          bao policy write devices /tmp/policy-devices.hcl
+        
+          cat >/tmp/policy-mqtt-sign.hcl <<'EOF'
+          path "mqtt-broker/issue/device" {
+            capabilities = ["create", "update"]
+          }
+          path "mqtt-broker/sign/device" {
+            capabilities = ["create", "update"]
+          }
+          EOF
+          bao policy write mqtt-sign /tmp/policy-mqtt-sign.hcl
+  
+          bao auth enable cert
+          bao write auth/cert/certs/clients display_name="clients" policies="default,devices-sign,mqtt-sign" certificate=@/mnt/pki/ca/ca.cert
+  
+          bao list devices/issuers
+          issuer="$(bao list devices/issuers 2>/dev/null | awk 'NR>2 && NF {print; exit}')"
+          
+          # Create device-auth certificate
+          bao read -field=certificate  devices/issuer/$${issuer} > /tmp/devices_ca.pem
+          bao write auth/cert/certs/device-auth \
+            display_name="device-auth" \
+            policies="devices" \
+            certificate=@/tmp/devices_ca.pem
+        
+          issuer="$(bao list mqtt-broker/issuers 2>/dev/null | awk 'NR>2 && NF {print; exit}')"
+        
+          # Create mqtt-broker certificate
+          bao read -field=certificate  mqtt-broker/issuer/$${issuer} > /mnt/pki/mqtt_ca.pem
+
+    volumes:
+      - ./pki:/mnt/pki
+
+  mqtt-broker:
+    image: &mosquitto eclipse-mosquitto:2.0.22-openssl
+    ports:
+      - "1883:1883"
+      - "8883:8883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./mqtt-certs:/mosquitto/certs
+      - ./mqtt-data:/mqtt-init
+      - ./pki:/mnt/pki:ro
+    depends_on:
+      - mqtt-init
+  mqtt-init:
+    image: *mosquitto
+    command:
+      - /bin/sh
+      - -c
+      - |
+        sleep 5
+        mosquitto_passwd -b -c /mqtt-init/passwd admin 12345678
+        chmod 644 ./mqtt-init/passwd
+    volumes:
+      - ./mqtt-data:/mqtt-init
