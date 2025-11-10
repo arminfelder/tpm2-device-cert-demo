@@ -37,6 +37,7 @@ packages:
   - libtpm2-pkcs11-tools
   - libtpm2-pkcs11-1
   - ca-certificates
+  - mosquitto-clients
 
 users:
   - name: service-technician
@@ -49,6 +50,9 @@ runcmd:
   - systemctl restart ssh
   - update-ca-certificates
   - /root/gen_device_cert.sh
+  - systemctl daemon-reload
+  - systemctl enable mqtt-publisher.service
+  - systemctl start mqtt-publisher.service
 
 write_files:
   - content: |
@@ -103,9 +107,81 @@ write_files:
         --request POST \
         --data "$payload" \
         https://${VM_GATEWAY_IP}:8443/v1/mqtt-broker/sign/device | jq -r '.data.certificate')
+      
+      echo "$CERTIFICATE" > /etc/ssl/certs/mqtt.crt
+      chmod 600 /etc/ssl/certs/mqtt.crt
 
     path: /root/gen_mqtt_cert.sh
     permissions: '0500'
+  - content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      BROKER_HOST="${MQTT_HOST:-${VM_GATEWAY_IP}}"
+      BROKER_PORT="${MQTT_PORT:-8883}"
+      TOPIC="${MQTT_TOPIC:-sensors/temperature}"
+      CLIENT_ID="${MQTT_CLIENT_ID:-${VM_NAME}-publisher}"
+
+      CERT="/etc/ssl/certs/mqtt.crt"
+      KEY="/etc/ssl/private/mqtt.crt"
+      CAFILE="/usr/local/share/ca-certificates/broker.crt"
+
+      if ! command -v mosquitto_pub >/dev/null 2>&1; then
+      echo "mosquitto-clients not installed" >&2
+      exit 1
+      fi
+
+      if [ ! -s "$CERT" ] || [ ! -s "$KEY" ] || [ ! -s "$CAFILE" ]; then
+      echo "Required certs not found: $CERT $KEY $CAFILE" >&2
+      exit 1
+      fi
+
+      while true; do
+      temp=$(awk -v min=18 -v max=30 'BEGIN{srand(); printf "%.2f", min+rand()*(max-min)}')
+      payload=$(jq -n --arg ts "$(date -u +%FT%TZ)" --arg t "$temp" \
+      '{timestamp:$ts, temperature:($t|tonumber), unit:"C"}')
+      
+      mosquitto_pub \
+      --cafile "$CAFILE" \
+      --cert "$CERT" \
+      --key "$KEY" \
+      --insecure \
+      -h "$BROKER_HOST" -p "$BROKER_PORT" \
+      -i "$CLIENT_ID" \
+      -t "$TOPIC" \
+      -m "$payload"
+      
+      sleep 1
+      done
+    path: /opt/mqtt_publish.sh
+    permissions: '0500'
+  - content: |
+      [Unit]
+      Description=MQTT Publisher
+      Wants=network-online.target
+      After=network-online.target
+      # Ensure cert generation happens first
+      Requires=gen-device-cert.service gen-mqtt-cert.service
+      After=gen-device-cert.service gen-mqtt-cert.service
+
+      [Service]
+      Type=simple
+      ExecStart=/opt/mqtt_publish.sh
+      Restart=always
+      RestartSec=5s
+      User=root
+      Group=root
+      Environment=OPENSSL_MODULES=/usr/lib/ssl/modules
+      # Hardening (adjust if needed)
+      NoNewPrivileges=true
+      PrivateTmp=true
+      ProtectSystem=full
+      ProtectHome=true
+
+      [Install]
+      WantedBy=multi-user.target
+    path: /etc/systemd/system/mqtt-publisher.service
+    permissions: '0644'
   - content: |
       ${PKI_SERVER_CERT}
     path: /usr/local/share/ca-certificates/pki.crt

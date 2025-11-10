@@ -1,0 +1,25 @@
+
+@startuml
+actor       Provsioner  as provisioner
+entity      Device    as device
+entity      PKI     as pki
+entity      "device builtin TPM2"     as tpm2
+entity      "MQTT broker"     as mqtt
+
+provisioner -> pki : request bootstrap certificate
+pki -> provisioner : bootstrap certificate
+provisioner -> device : copy bootstrap certificate
+device -> tpm2 : create private key
+device -> tpm2 : create device certificate CSR
+tpm2 -> device : device certificate CSR
+device -> pki : authenticate using bootstrap certificate
+pki -> device : session ticket
+device -> pki : request device certificate using the CSR
+pki -> device : device certificate
+device -> pki : authenticate using device certificate
+pki -> device : session ticket
+device -> tpm2 : create mqtts certificate CSR
+tpm2 -> device : mqtts certificate CSR
+device -> mqtt : authenticate using mqtts certificate
+@enduml
+
