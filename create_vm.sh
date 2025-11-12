@@ -139,7 +139,6 @@ function print_connection_info() {
     get_vm_disk_info
     echo "Serial Console: virsh console $VM_NAME"
     echo "Connect as root: ./connect-as-root.sh"
-    echo "Connect as user: ./connect-as-user.sh"
     echo "------------------------"
 }
 
@@ -151,7 +150,7 @@ function patch_cloudinit_config() {
     export PKI_SERVER_CERT=$(cat ./pki/server/server.crt | base64 -w0 )
     export BOOTSTRAP_CERT=$(cat ./pki/bootstrap/bootstrap.crt | base64 -w0 )
     export BOOTSTRAP_KEY=$(cat ./pki/bootstrap/bootstrap.key | base64 -w0 )
-    export BROKER_CA_CERT=$(cat ./mqtt-certs/mqtt/server.crt | base64 -w0 )
+    export BROKER_CA_CERT=$(cat ./mqtt-certs/ca/ca.cert | base64 -w0 )
     export VM_GATEWAY_IP=$( get_vm_gateway_ip )
     echo "$(envsubst '$ROOT_PSW,$VM_NAME,$BOOTSTRAP_CERT,$BOOTSTRAP_KEY,$PKI_SERVER_CERT,$VM_GATEWAY_IP,$BROKER_CA_CERT' < ./cloud-init/user-data.yaml.tmpl)" > ./cloud-init/user-data.yaml
 }

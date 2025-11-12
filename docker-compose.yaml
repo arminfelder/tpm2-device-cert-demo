@@ -29,24 +29,15 @@ services:
       - |
           sleep 5
   
-          # create device cert
+          # device cert
           bao secrets enable -path=devices pki
           bao secrets tune -max-lease-ttl=87600h devices
-          bao write devices/root/generate/internal common_name="example.tld" ttl=87600h
+          bao write devices/root/generate/internal common_name="devices.tld" ttl=87600h
           bao write devices/config/urls issuing_certificates="http://pki:8200/v1/devices/ca" crl_distribution_points="http://pki:8200/v1/devices/crl"
           bao secrets enable -path=devices/issue pki
           bao write devices/roles/device allow_any_name=true client_flag=false server_flag=false key_usage="DigitalSignature,KeyEncipherment" ext_key_usage="ClientAuth" enforce_hostnames="false" max_ttl=10950d
         
-          # mqtt-broker
-          bao secrets enable -path=mqtt-broker pki
-          bao secrets tune -max-lease-ttl=87600h mqtt-broker
-          bao write mqtt-broker/root/generate/internal common_name="example.tld" ttl=87600h
-          bao write mqtt-broker/config/urls issuing_certificates="http://pki:8200/v1/mqtt-broker/ca" crl_distribution_points="http://pki:8200/v1/mqtt-broker/crl"
-          bao secrets enable -path=mqtt-broker/issue pki
-          bao write mqtt-broker/roles/device allow_any_name=true client_flag=false server_flag=false key_usage="DigitalSignature,KeyEncipherment" ext_key_usage="ClientAuth" enforce_hostnames="false" max_ttl=10950d
-               
-        
-          # Policy allowing CSR signing on devices/roles/device
+          ## Policy allowing CSR signing on devices/roles/device
           cat >/tmp/policy-devices-sign.hcl <<'EOF'
           path "devices/issue/device" {
             capabilities = ["create", "update"]
@@ -56,17 +47,16 @@ services:
           }
           EOF
           bao policy write devices-sign /tmp/policy-devices-sign.hcl
-          
-          cat >/tmp/policy-devices.hcl <<'EOF'
-          path "devices/issue/device" {
-            capabilities = ["create", "update"]
-          }
-          path "devices/sign/device" {
-            capabilities = ["create", "update"]
-          }
-          EOF
-          bao policy write devices /tmp/policy-devices.hcl
         
+          # MQTT PKI
+          bao secrets enable -path=mqtt-broker pki
+          bao secrets tune -max-lease-ttl=87600h mqtt-broker
+          bao write mqtt-broker/root/generate/internal common_name="mqtt.tld" ttl=87600h
+          bao write mqtt-broker/config/urls issuing_certificates="http://pki:8200/v1/mqtt-broker/ca" crl_distribution_points="http://pki:8200/v1/mqtt-broker/crl"  
+          bao secrets enable -path=mqtt-broker/issue pki
+          bao write mqtt-broker/roles/device allow_any_name=true client_flag=false server_flag=false key_usage="DigitalSignature,KeyEncipherment" ext_key_usage="ClientAuth" enforce_hostnames="false" max_ttl=10950d
+        
+          ## Policy allowing CSR signing on devices/roles/device
           cat >/tmp/policy-mqtt-sign.hcl <<'EOF'
           path "mqtt-broker/issue/device" {
             capabilities = ["create", "update"]
@@ -76,24 +66,24 @@ services:
           }
           EOF
           bao policy write mqtt-sign /tmp/policy-mqtt-sign.hcl
-  
+             
+          # enable cert based auth  
           bao auth enable cert
-          bao write auth/cert/certs/clients display_name="clients" policies="default,devices-sign,mqtt-sign" certificate=@/mnt/pki/ca/ca.cert
-  
-          bao list devices/issuers
-          issuer="$(bao list devices/issuers 2>/dev/null | awk 'NR>2 && NF {print; exit}')"
           
-          # Create device-auth certificate
-          bao read -field=certificate  devices/issuer/$${issuer} > /tmp/devices_ca.pem
-          bao write auth/cert/certs/device-auth \
-            display_name="device-auth" \
-            policies="devices" \
-            certificate=@/tmp/devices_ca.pem
+          ## bootstrap cert auth
+          bao write auth/cert/certs/bootstrap display_name="bootstrap" policies="default,devices-sign,mqtt-sign" certificate=@/mnt/pki/ca/ca.cert
+  
+          ## device cert auth
+          bao list devices/issuers
+          device_issuer="$(bao list devices/issuers 2>/dev/null | awk 'NR>2 && NF {print; exit}')"
+          
+          ## Create device-auth certificate
+          bao read -field=certificate  devices/issuer/$${device_issuer} > /tmp/devices_ca.pem
+          bao write auth/cert/certs/device display_name="device" policies="default,mqtt-sign" certificate=@/tmp/devices_ca.pem
         
-          issuer="$(bao list mqtt-broker/issuers 2>/dev/null | awk 'NR>2 && NF {print; exit}')"
-        
-          # Create mqtt-broker certificate
-          bao read -field=certificate  mqtt-broker/issuer/$${issuer} > /mnt/pki/mqtt_ca.pem
+          # export mqtt-broker certificate
+          mqtt_issuer="$(bao list mqtt-broker/issuers 2>/dev/null | awk 'NR>2 && NF {print; exit}')"     
+          bao read -field=certificate  mqtt-broker/issuer/$${mqtt_issuer} > /mnt/pki/mqtt_ca.pem
 
     volumes:
       - ./pki:/mnt/pki
